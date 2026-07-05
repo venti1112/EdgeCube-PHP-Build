@@ -1244,6 +1244,14 @@ if [[ "$(uname -s)" == "Darwin" ]] && [[ "$IS_CROSSCOMPILE" != "yes" ]]; then
 	export EXTRA_CFLAGS=-lresolv
 fi
 
+# EdgeCube: Android 外部存储（/storage/emulated/0，FUSE/sdcardfs）对 flock()
+# 支持不完整，进程崩溃后排他锁可能不被释放，导致 PMMP 误判"另一个实例正在
+# 运行"。patch ext/standard/file.c 的 php_stream_lock 调用使其总返回成功。
+# 仅在 Android 交叉编译时应用，不影响其他平台。
+if [ "$COMPILE_FOR_ANDROID" == "yes" ]; then
+	sed -i=".backup" 's|if (php_stream_lock(stream, act))|if (0) /* EdgeCube: Android FUSE flock unsupported, always succeed */|' ext/standard/file.c
+fi
+
 if [[ "$COMPILE_DEBUG" == "yes" ]]; then
 	HAS_DEBUG="--enable-debug"
 else
