@@ -1,76 +1,96 @@
 name: Build and publish PHP binaries
 
 on:
-  push:
-    branches: "**"
-    tags-ignore: "**"
-  pull_request:
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  MUSL_CROSS_MAKE_VERSION: 43fcb1e63786b96add78f89d7454709ae0159fa0
+  PM_VERSION_MAJOR: "5"
+  PHP_VERSION_BASE: "8.2"
+
 jobs:
-  all-builds:
-    name: PM${{ matrix.pm-version-major }} - PHP ${{ matrix.php-version-base }}
-    permissions:
-      contents: write
-    strategy:
-      matrix:
-        include:
-          - pm-version-major: 5
-            php-version-base: "8.1"
-          - pm-version-major: 5
-            php-version-base: "8.2"
-            special-release: default-latest #default = best for PM5, latest = display as latest on GitHub 
-          - pm-version-major: 5
-            php-version-base: "8.3"
-          - pm-version-major: 5
-            php-version-base: "8.4"
-          - pm-version-major: 5
-            php-version-base: "8.5"
-            pm-preview: true
-
-    uses: ./.github/workflows/main-pm-matrix.yml
-    with:
-      pm-version-major: ${{ matrix.pm-version-major }}
-      php-version-base: ${{ matrix.php-version-base }}
-      special-release: ${{ matrix.special-release || 'none' }}
-      pm-preview: ${{ matrix.pm-preview || false }}
-    secrets: inherit
-
-  publish-archive-release:
-    name: Publish archive release
-    needs: [all-builds]
+  android:
+    name: Android arm64
     runs-on: ubuntu-22.04
-    if: ${{ github.ref_name == 'stable' && github.ref_type == 'branch' && !contains(github.event.head_commit.message, '[no release]') }}
 
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v6
-        with:
-          path: ${{ github.workspace }}
+      - uses: actions/checkout@v5
 
-      - name: Generate release notes
+      - name: Install tools and dependencies
         run: |
-          echo "Built by: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> changelog.md
-          echo "Build number: ${{ github.run_number }}" >> changelog.md
-          echo -e "\n\n\n" >> changelog.md
-          echo ":information_source: **Linux/MacOS users**: Please see [this page](https://doc.pmmp.io/en/rtfd/faq/installation/opcache.so.html) to fix extension loading errors. Also, check out the [PocketMine-MP Linux/MacOS installer](https://doc.pmmp.io/en/rtfd/installation/get-dot-pmmp-dot-io.html)." >> changelog.md
-          echo ":warning: **Windows users**: Don't forget to install [Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe) or the binary will not work!" >> changelog.md
-          echo -e "\n\n\n" >> changelog.md
+          sudo apt-get update
+          sudo apt-get install make autoconf automake libtool libtool-bin m4 wget libc-bin gzip bzip2 bison g++ git re2c
 
-      - name: Create release
-        uses: ncipollo/release-action@v1.20.0
+      - name: Prepare compile.sh download cache
+        id: download-cache
+        uses: actions/cache@v4
         with:
-          artifacts: |
-            ${{ github.workspace }}/*PHP-*-PM*/*.tar.gz
-            ${{ github.workspace }}/*PHP-*-Windows-PM*/*.zip
-            ${{ github.workspace }}/*PHP-*.gdbinit/*.gdbinit
+          path: ./download_cache
+          key: compile-sh-cache-ssl-https-${{ hashFiles('./compile.sh') }}
+          restore-keys: compile-sh-cache-ssl-https-
 
-          name: PHP (Build ${{ github.run_number }}) - Archive
-          tag: php-build-${{ github.run_number }}
-          commit: ${{ github.sha }}
-          allowUpdates: false
-          bodyFile: ${{ github.workspace }}/changelog.md
+      - name: Fetch compiler cache
+        id: compiler-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/compiler
+          key: musl-cross-make-${{ env.MUSL_CROSS_MAKE_VERSION }}
+
+      - name: Checkout musl-cross-make
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: pmmp/musl-cross-make
+          path: musl-cross-make
+          ref: ${{ env.MUSL_CROSS_MAKE_VERSION }}
+
+      - name: Build compiler
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        working-directory: musl-cross-make
+        run: |
+          echo "TARGET = aarch64-linux-musl" > config.mak
+          make -j$(nproc)
+          make install
+          mv ./output "${{ github.workspace }}/compiler"
+
+      - name: Compile PHP
+        run: |
+          export PATH="${{ github.workspace }}/compiler/bin:$PATH"
+
+          # Used "set -ex" instead of hashbang since script isn't executed with hashbang
+          set -ex
+          trap "exit 1" ERR
+          ./compile.sh -t android-aarch64 -x -j 4 -g -P ${{ env.PM_VERSION_MAJOR }} -c ./download_cache -D -z ${{ env.PHP_VERSION_BASE }}
+
+      - name: Create tarball
+        run: |
+          tar -czf ./PHP-${{ env.PHP_VERSION_BASE }}-Android-arm64-PM${{ env.PM_VERSION_MAJOR }}.tar.gz bin
+          tar -czf ./Z-PHP-${{ env.PHP_VERSION_BASE }}-Android-arm64-PM${{ env.PM_VERSION_MAJOR }}-debugging-symbols.tar.gz bin-debug
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: PHP-${{ env.PHP_VERSION_BASE }}-Android-PM${{ env.PM_VERSION_MAJOR }}
+          path: |
+            ./*PHP-${{ env.PHP_VERSION_BASE }}-Android-arm64-PM${{ env.PM_VERSION_MAJOR }}*.tar.gz
+            install.log
+            compile.sh
+          if-no-files-found: error
+
+      - name: Prepare workspace for upload
+        if: failure()
+        run: tar -czf workspace.tar.gz install_data
+
+      - name: Upload workspace
+        uses: actions/upload-artifact@v5
+        if: failure()
+        with:
+          name: PHP-${{ env.PHP_VERSION_BASE }}-Android-workspace-PM${{ env.PM_VERSION_MAJOR }}
+          path: |
+            workspace.tar.gz
+          if-no-files-found: error
