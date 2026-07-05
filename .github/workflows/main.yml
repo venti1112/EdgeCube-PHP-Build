@@ -2,6 +2,17 @@ name: Build and publish PHP binaries
 
 on:
   workflow_dispatch:
+    inputs:
+      pm-version-major:
+        description: 'PocketMine-MP major version'
+        required: true
+        default: 5
+        type: number
+      php-version-base:
+        description: 'PHP base version (e.g., 8.2)'
+        required: true
+        default: '8.2'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -9,8 +20,8 @@ concurrency:
 
 env:
   MUSL_CROSS_MAKE_VERSION: 43fcb1e63786b96add78f89d7454709ae0159fa0
-  PM_VERSION_MAJOR: "5"
-  PHP_VERSION_BASE: "8.2"
+  PM_VERSION_MAJOR: ${{ inputs.pm-version-major || '5' }}
+  PHP_VERSION_BASE: ${{ inputs.php-version-base || '8.2' }}
 
 jobs:
   android:
